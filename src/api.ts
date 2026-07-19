@@ -28,6 +28,43 @@ export async function reverseGeocode(p: LatLon): Promise<string> {
   }
 }
 
+export interface Venue extends LatLon {
+  name: string
+  kind: string
+}
+
+/** Named cafés/bars/restaurants near a point, via the Overpass API (OpenStreetMap). */
+export async function findVenues(center: LatLon, radiusM = 700): Promise<Venue[]> {
+  const around = `(around:${radiusM},${center.lat.toFixed(5)},${center.lon.toFixed(5)})`
+  const filter = '["amenity"~"^(cafe|bar|pub|restaurant|fast_food)$"]["name"]'
+  const query = `[out:json][timeout:10];(node${filter}${around};way${filter}${around};);out center 40;`
+  const res = await fetch('https://overpass-api.de/api/interpreter', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `data=${encodeURIComponent(query)}`,
+  })
+  if (!res.ok) throw new Error(`Venue search failed (HTTP ${res.status})`)
+  const data = (await res.json()) as {
+    elements: {
+      lat?: number
+      lon?: number
+      center?: { lat: number; lon: number }
+      tags?: { name?: string; amenity?: string }
+    }[]
+  }
+  const seen = new Set<string>()
+  const venues: Venue[] = []
+  for (const el of data.elements) {
+    const name = el.tags?.name
+    const lat = el.lat ?? el.center?.lat
+    const lon = el.lon ?? el.center?.lon
+    if (!name || lat == null || lon == null || seen.has(name)) continue
+    seen.add(name)
+    venues.push({ name, kind: el.tags?.amenity ?? 'restaurant', lat, lon })
+  }
+  return venues
+}
+
 /** Road route geometry from A to B as [lat, lon] pairs, for drawing on the map. */
 export async function driveRoute(from: LatLon, to: LatLon): Promise<[number, number][]> {
   const coords = `${from.lon.toFixed(5)},${from.lat.toFixed(5)};${to.lon.toFixed(5)},${to.lat.toFixed(5)}`

@@ -179,6 +179,27 @@ button.toggle.active {
   color: var(--text);
 }
 
+.section-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+button.ghost {
+  padding: 4px 10px;
+  font-size: 12px;
+  background: none;
+  border: 1px solid var(--line);
+  color: var(--muted);
+}
+
+button.ghost:hover:not(:disabled) {
+  color: var(--text);
+  border-color: rgba(148, 163, 184, 0.4);
+  background: rgba(30, 41, 59, 0.6);
+}
+
 .point-list {
   list-style: none;
   margin: 0;
@@ -324,6 +345,58 @@ button.remove:hover {
   background: rgba(22, 101, 52, 0.25);
 }
 
+.venues {
+  margin-bottom: 8px;
+}
+
+.venue-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.venue-list button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 12.5px;
+  background: rgba(30, 41, 59, 0.4);
+  border: 1px solid transparent;
+  color: var(--muted);
+}
+
+.venue-list button:hover {
+  color: var(--text);
+  background: rgba(51, 65, 85, 0.6);
+}
+
+.venue-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.venue-dist {
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.venue-pin {
+  font-size: 19px;
+  line-height: 26px;
+  text-align: center;
+  filter: drop-shadow(0 2px 5px rgba(0, 0, 0, 0.8));
+  animation: pop-in 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
 .times {
   width: 100%;
   border-collapse: collapse;
@@ -413,6 +486,11 @@ footer {
 .popup-times {
   margin: 6px 0 0;
   padding-left: 16px;
+}
+
+/* Brighten CARTO's gray label tiles to near-white for readability */
+.leaflet-labels-pane {
+  filter: brightness(1.9) contrast(1.05);
 }
 
 /* Dark-theme Leaflet chrome */

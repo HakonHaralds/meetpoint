@@ -1,6 +1,14 @@
 import { useEffect, useRef, useState } from 'react'
 import L from 'leaflet'
-import { geocode, reverseGeocode, driveDurations, driveRoute, type GeocodeResult } from './api'
+import {
+  geocode,
+  reverseGeocode,
+  driveDurations,
+  driveRoute,
+  findVenues,
+  type GeocodeResult,
+  type Venue,
+} from './api'
 import { centroid, geometricMedian, haversine, type LatLon } from './geo'
 import { findDrivingCenters } from './drivingCenter'
 import './App.css'
@@ -85,6 +93,44 @@ function statsOf(times: (number | null)[] | null): CenterStats | null {
   return { total, worst, spread: worst - Math.min(...ts) }
 }
 
+const VENUE_EMOJI: Record<string, string> = {
+  cafe: '☕',
+  bar: '🍸',
+  pub: '🍺',
+  restaurant: '🍽️',
+  fast_food: '🍔',
+}
+
+/** Encode the current points into a shareable URL (base64url in the hash). */
+function encodeShareUrl(points: HomePoint[]): string {
+  const data = points.map((p) => [Number(p.lat.toFixed(5)), Number(p.lon.toFixed(5)), p.label])
+  const bytes = new TextEncoder().encode(JSON.stringify(data))
+  const b64 = btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/, '')
+  return `${location.origin}${location.pathname}#p=${b64}`
+}
+
+function decodeShareHash(hash: string): HomePoint[] | null {
+  const m = hash.match(/[#&]p=([A-Za-z0-9_-]+)/)
+  if (!m) return null
+  try {
+    const b64 = m[1].replace(/-/g, '+').replace(/_/g, '/')
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0))
+    const data = JSON.parse(new TextDecoder().decode(bytes)) as [number, number, string][]
+    if (!Array.isArray(data) || data.length === 0) return null
+    return data.map(([lat, lon, label], i) => ({
+      id: `shared-${i}`,
+      lat: Number(lat),
+      lon: Number(lon),
+      label: String(label),
+    }))
+  } catch {
+    return null
+  }
+}
+
 function loadPoints(): HomePoint[] {
   try {
     const raw = localStorage.getItem(STORAGE_KEY)
@@ -97,7 +143,9 @@ function loadPoints(): HomePoint[] {
 }
 
 export default function App() {
-  const [points, setPoints] = useState<HomePoint[]>(loadPoints)
+  const [points, setPoints] = useState<HomePoint[]>(
+    () => decodeShareHash(location.hash) ?? loadPoints(),
+  )
   const [query, setQuery] = useState('')
   const [searchResults, setSearchResults] = useState<GeocodeResult[]>([])
   const [searching, setSearching] = useState(false)
@@ -107,12 +155,16 @@ export default function App() {
   const [error, setError] = useState('')
   const [centers, setCenters] = useState<CenterResult[]>([])
   const [selected, setSelected] = useState<CenterKind | null>(null)
+  const [venues, setVenues] = useState<Venue[]>([])
+  const [venuesBusy, setVenuesBusy] = useState(false)
+  const [copied, setCopied] = useState(false)
 
   const mapRef = useRef<L.Map | null>(null)
   const mapDivRef = useRef<HTMLDivElement | null>(null)
   const homeLayerRef = useRef<L.LayerGroup | null>(null)
   const centerLayerRef = useRef<L.LayerGroup | null>(null)
   const linesLayerRef = useRef<L.LayerGroup | null>(null)
+  const venueLayerRef = useRef<L.LayerGroup | null>(null)
   const radarMarkerRef = useRef<L.Marker | null>(null)
   const routeCacheRef = useRef(new Map<string, [number, number][]>())
   const clickModeRef = useRef(clickMode)
@@ -129,14 +181,25 @@ export default function App() {
     if (!mapDivRef.current || mapRef.current) return
     const map = L.map(mapDivRef.current, { zoomControl: false }).setView([64.13, -21.9], 11)
     L.control.zoom({ position: 'topright' }).addTo(map)
-    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_nolabels/{z}/{x}/{y}{r}.png', {
       maxZoom: 19,
       attribution:
         '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     }).addTo(map)
+    // Labels in their own pane: brightened via CSS to near-white and rendered
+    // above the route lines so street names stay readable.
+    const labelsPane = map.createPane('labels')
+    labelsPane.style.zIndex = '450'
+    labelsPane.style.pointerEvents = 'none'
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_only_labels/{z}/{x}/{y}{r}.png', {
+      maxZoom: 19,
+      pane: 'labels',
+    }).addTo(map)
+    if (import.meta.env.DEV) (window as unknown as { _map?: L.Map })._map = map
     linesLayerRef.current = L.layerGroup().addTo(map)
     homeLayerRef.current = L.layerGroup().addTo(map)
     centerLayerRef.current = L.layerGroup().addTo(map)
+    venueLayerRef.current = L.layerGroup().addTo(map)
 
     map.on('click', (e: L.LeafletMouseEvent) => {
       if (!clickModeRef.current) return
@@ -280,6 +343,53 @@ export default function App() {
       cancelled = true
     }
   }, [selected, centers])
+
+  // Venue markers on the map.
+  useEffect(() => {
+    const layer = venueLayerRef.current
+    if (!layer) return
+    layer.clearLayers()
+    for (const v of venues) {
+      const icon = L.divIcon({
+        className: '',
+        html: `<div class="venue-pin">${VENUE_EMOJI[v.kind] ?? '📍'}</div>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+      })
+      L.marker([v.lat, v.lon], { icon }).bindTooltip(v.name).addTo(layer)
+    }
+  }, [venues])
+
+  // Venues belong to one selected center; clear them when the context changes.
+  useEffect(() => {
+    setVenues([])
+  }, [selected, centers])
+
+  async function locateVenues(c: CenterResult) {
+    if (venuesBusy) return
+    setVenuesBusy(true)
+    setError('')
+    try {
+      const found = await findVenues(c)
+      found.sort((a, b) => haversine(c, a) - haversine(c, b))
+      setVenues(found.slice(0, 12))
+      if (found.length === 0) setError('No named venues within 700 m of this spot.')
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e))
+    } finally {
+      setVenuesBusy(false)
+    }
+  }
+
+  async function copyShareLink() {
+    try {
+      await navigator.clipboard.writeText(encodeShareUrl(points))
+      setCopied(true)
+      setTimeout(() => setCopied(false), 2500)
+    } catch {
+      setError('Could not copy — your browser blocked clipboard access.')
+    }
+  }
 
   function addPoint(p: LatLon, label?: string) {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -428,7 +538,14 @@ export default function App() {
           {clickMode ? '✓ Click the map to add a point (on)' : 'Add points by clicking the map'}
         </button>
 
-        <h2>Homes ({points.length})</h2>
+        <div className="section-row">
+          <h2>Homes ({points.length})</h2>
+          {points.length > 0 && (
+            <button className="ghost" onClick={copyShareLink}>
+              {copied ? '✓ Link copied!' : '🔗 Copy share link'}
+            </button>
+          )}
+        </div>
         {points.length === 0 && <p className="hint">No points yet — search an address or click the map.</p>}
         <ul className="point-list">
           {points.map((p, i) => (
@@ -487,6 +604,28 @@ export default function App() {
                       <span className={`chip ${s.spread === best.spread ? 'best' : ''}`}>
                         Gap {formatDuration(s.spread)}
                       </span>
+                    </div>
+                  )}
+                  {selected === c.kind && (
+                    <div className="venues" onClick={(e) => e.stopPropagation()}>
+                      <button className="ghost" onClick={() => locateVenues(c)} disabled={venuesBusy}>
+                        {venuesBusy ? 'Searching…' : '☕ Find venues nearby'}
+                      </button>
+                      {venues.length > 0 && (
+                        <ul className="venue-list">
+                          {venues.map((v) => (
+                            <li key={`${v.name}-${v.lat}`}>
+                              <button
+                                onClick={() => mapRef.current?.flyTo([v.lat, v.lon], 16, { duration: 0.6 })}
+                              >
+                                <span>{VENUE_EMOJI[v.kind] ?? '📍'}</span>
+                                <span className="venue-name">{v.name}</span>
+                                <span className="venue-dist">{Math.round(haversine(c, v))} m</span>
+                              </button>
+                            </li>
+                          ))}
+                        </ul>
+                      )}
                     </div>
                   )}
                   {c.times && (
