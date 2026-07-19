@@ -109,7 +109,12 @@ function encodeShareUrl(points: HomePoint[]): string {
     .replace(/\+/g, '-')
     .replace(/\//g, '_')
     .replace(/=+$/, '')
-  return `${location.origin}${location.pathname}#p=${b64}`
+  // Links generated during local dev should still point at the public site.
+  const base =
+    location.hostname === 'localhost' || location.hostname === '127.0.0.1'
+      ? 'https://meet.hakonvidir.is/'
+      : `${location.origin}${location.pathname}`
+  return `${base}#p=${b64}`
 }
 
 function decodeShareHash(hash: string): HomePoint[] | null {
