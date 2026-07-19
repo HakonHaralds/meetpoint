@@ -22,37 +22,37 @@ interface CenterResult extends LatLon {
   times: (number | null)[] | null
 }
 
-const PERSON_COLORS = ['#e11d48', '#2563eb', '#16a34a', '#d97706', '#9333ea', '#0891b2', '#be185d']
+const PERSON_COLORS = ['#fb7185', '#60a5fa', '#4ade80', '#fbbf24', '#c084fc', '#22d3ee', '#f472b6']
 
 const CENTER_STYLE: Record<CenterKind, { title: string; description: string; color: string; badge: string }> = {
   centroid: {
     title: 'Geographic center',
     description: 'Average of all positions (straight-line centroid).',
-    color: '#0ea5e9',
+    color: '#38bdf8',
     badge: 'G',
   },
   median: {
     title: 'Straight-line fair point',
     description: 'Minimizes the total straight-line distance for the group.',
-    color: '#8b5cf6',
+    color: '#a78bfa',
     badge: 'M',
   },
   fastest: {
     title: 'Driving — fastest overall',
     description: 'Minimizes the sum of everyone’s drive times.',
-    color: '#16a34a',
+    color: '#34d399',
     badge: 'D',
   },
   fairest: {
     title: 'Driving — fairest',
     description: 'Minimizes the longest single drive.',
-    color: '#f59e0b',
+    color: '#fbbf24',
     badge: 'F',
   },
   equal: {
     title: 'Driving — equal time',
     description: 'Everyone drives about the same time (best effort, favoring closer spots).',
-    color: '#db2777',
+    color: '#f472b6',
     badge: 'E',
   },
 }
@@ -69,6 +69,20 @@ function formatDuration(seconds: number | null): string {
   const mins = Math.round(seconds / 60)
   if (mins < 60) return `${mins} min`
   return `${Math.floor(mins / 60)} h ${String(mins % 60).padStart(2, '0')} min`
+}
+
+interface CenterStats {
+  total: number
+  worst: number
+  spread: number
+}
+
+function statsOf(times: (number | null)[] | null): CenterStats | null {
+  if (!times || times.length === 0 || times.some((t) => t == null)) return null
+  const ts = times as number[]
+  const total = ts.reduce((a, b) => a + b, 0)
+  const worst = Math.max(...ts)
+  return { total, worst, spread: worst - Math.min(...ts) }
 }
 
 function loadPoints(): HomePoint[] {
@@ -99,6 +113,7 @@ export default function App() {
   const homeLayerRef = useRef<L.LayerGroup | null>(null)
   const centerLayerRef = useRef<L.LayerGroup | null>(null)
   const linesLayerRef = useRef<L.LayerGroup | null>(null)
+  const radarMarkerRef = useRef<L.Marker | null>(null)
   const routeCacheRef = useRef(new Map<string, [number, number][]>())
   const clickModeRef = useRef(clickMode)
   clickModeRef.current = clickMode
@@ -112,10 +127,12 @@ export default function App() {
   // Initialize the map once.
   useEffect(() => {
     if (!mapDivRef.current || mapRef.current) return
-    const map = L.map(mapDivRef.current).setView([64.13, -21.9], 11)
-    L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    const map = L.map(mapDivRef.current, { zoomControl: false }).setView([64.13, -21.9], 11)
+    L.control.zoom({ position: 'topright' }).addTo(map)
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
       maxZoom: 19,
-      attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
+      attribution:
+        '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/attributions">CARTO</a>',
     }).addTo(map)
     linesLayerRef.current = L.layerGroup().addTo(map)
     homeLayerRef.current = L.layerGroup().addTo(map)
@@ -141,19 +158,17 @@ export default function App() {
     layer.clearLayers()
     points.forEach((p, i) => {
       const color = PERSON_COLORS[i % PERSON_COLORS.length]
-      L.circleMarker([p.lat, p.lon], {
-        radius: 9,
-        color: '#ffffff',
-        weight: 2,
-        fillColor: color,
-        fillOpacity: 1,
+      const icon = L.divIcon({
+        className: '',
+        html: `<div class="home-pin" style="--c:${color}"></div>`,
+        iconSize: [18, 18],
+        iconAnchor: [9, 9],
       })
-        .bindTooltip(shortLabel(p.label))
-        .addTo(layer)
+      L.marker([p.lat, p.lon], { icon }).bindTooltip(shortLabel(p.label)).addTo(layer)
     })
     if (points.length > 0 && mapRef.current) {
       const bounds = L.latLngBounds(points.map((p) => [p.lat, p.lon] as [number, number]))
-      mapRef.current.fitBounds(bounds.pad(0.3), { maxZoom: 14 })
+      mapRef.current.flyToBounds(bounds.pad(0.3), { maxZoom: 14, duration: 0.8 })
     }
   }, [points])
 
@@ -165,7 +180,7 @@ export default function App() {
     for (const c of centers) {
       const icon = L.divIcon({
         className: '',
-        html: `<div class="center-badge" style="background:${c.color}">${c.badge}</div>`,
+        html: `<div class="center-badge" style="--c:${c.color}">${c.badge}</div>`,
         iconSize: [30, 30],
         iconAnchor: [15, 15],
       })
@@ -201,12 +216,31 @@ export default function App() {
         {
           color: PERSON_COLORS[i % PERSON_COLORS.length],
           weight: 3,
-          opacity: 0.7,
+          opacity: 0.65,
           dashArray: '6 8',
+          className: 'dash-line',
         },
       )
         .bindTooltip(tooltip)
         .addTo(layer)
+
+    const drawRoute = (coords: [number, number][], i: number, tooltip: string) => {
+      const color = PERSON_COLORS[i % PERSON_COLORS.length]
+      L.polyline(coords, { color, weight: 11, opacity: 0.16, interactive: false }).addTo(layer)
+      const line = L.polyline(coords, { color, weight: 4, opacity: 0.95, className: 'route-line' })
+        .bindTooltip(tooltip)
+        .addTo(layer)
+      // Animate the route being drawn from home to destination.
+      const el = line.getElement() as SVGPathElement | null
+      if (el?.getTotalLength) {
+        const len = el.getTotalLength()
+        el.style.strokeDasharray = `${len}`
+        el.style.strokeDashoffset = `${len}`
+        void el.getBoundingClientRect()
+        el.style.transition = 'stroke-dashoffset 0.9s ease-out'
+        el.style.strokeDashoffset = '0'
+      }
+    }
 
     if (c.kind === 'centroid' || c.kind === 'median') {
       homes.forEach((p, i) =>
@@ -225,13 +259,7 @@ export default function App() {
       const draw = (coords: [number, number][]) => {
         if (cancelled) return
         layer.removeLayer(placeholder)
-        L.polyline(coords, {
-          color: PERSON_COLORS[i % PERSON_COLORS.length],
-          weight: 4,
-          opacity: 0.8,
-        })
-          .bindTooltip(tooltip)
-          .addTo(layer)
+        drawRoute(coords, i, tooltip)
       }
       if (cached) {
         draw(cached)
@@ -309,6 +337,20 @@ export default function App() {
     ])
     setSelected('centroid')
 
+    // Radar pulse over the search area while drive times are being fetched.
+    if (mapRef.current) {
+      const radarIcon = L.divIcon({
+        className: '',
+        html: '<div class="radar"><span></span><span></span></div>',
+        iconSize: [80, 80],
+        iconAnchor: [40, 40],
+      })
+      radarMarkerRef.current = L.marker([median.lat, median.lon], {
+        icon: radarIcon,
+        interactive: false,
+      }).addTo(mapRef.current)
+    }
+
     try {
       const driving = await findDrivingCenters(homes, setStatus)
       setStatus('Fetching final drive times…')
@@ -327,17 +369,34 @@ export default function App() {
       setError(e instanceof Error ? e.message : String(e))
       setStatus('')
     } finally {
+      radarMarkerRef.current?.remove()
+      radarMarkerRef.current = null
       setBusy(false)
     }
   }
 
+  const allStats = new Map<CenterKind, CenterStats | null>(centers.map((c) => [c.kind, statsOf(c.times)]))
+  const bestOf = (key: keyof CenterStats) => {
+    const vals = [...allStats.values()].filter((s): s is CenterStats => s !== null).map((s) => s[key])
+    return vals.length ? Math.min(...vals) : null
+  }
+  const best: Record<keyof CenterStats, number | null> = {
+    total: bestOf('total'),
+    worst: bestOf('worst'),
+    spread: bestOf('spread'),
+  }
+
   return (
     <div className="app">
-      <aside className="sidebar">
-        <h1>Meetpoint</h1>
-        <p className="subtitle">
-          Add everyone&apos;s home, then find the middle — as the crow flies and by car.
-        </p>
+      <div className="map" ref={mapDivRef} />
+      <aside className="panel">
+        <header className="brand">
+          <span className="logo">📍</span>
+          <div>
+            <h1>Meetpoint</h1>
+            <p className="subtitle">Find the middle — fair and square.</p>
+          </div>
+        </header>
 
         <div className="search-row">
           <input
@@ -389,55 +448,75 @@ export default function App() {
           {busy ? 'Calculating…' : 'Find meeting points'}
         </button>
         {points.length < 2 && <p className="hint">Add at least two homes to calculate.</p>}
-        {status && <p className="status">{status}</p>}
+        {status && (
+          <p className="status">
+            <span className="spinner" />
+            {status}
+          </p>
+        )}
         {error && <p className="error">{error}</p>}
 
         {centers.length > 0 && (
           <div className="results">
             <h2>Results</h2>
             <p className="hint">Click a result to draw everyone&apos;s travel lines on the map.</p>
-            {centers.map((c) => (
-              <div
-                key={c.kind}
-                className={`result-card ${selected === c.kind ? 'selected' : ''}`}
-                style={selected === c.kind ? { borderColor: c.color } : undefined}
-                onClick={() => setSelected(c.kind)}
-              >
-                <div className="result-head">
-                  <span className="center-badge small" style={{ background: c.color }}>
-                    {c.badge}
-                  </span>
-                  <b>{c.title}</b>
+            {centers.map((c) => {
+              const s = allStats.get(c.kind) ?? null
+              return (
+                <div
+                  key={c.kind}
+                  className={`result-card ${selected === c.kind ? 'selected' : ''}`}
+                  style={{ ['--c' as string]: c.color }}
+                  onClick={() => setSelected(c.kind)}
+                >
+                  <div className="result-head">
+                    <span className="center-badge small" style={{ background: c.color }}>
+                      {c.badge}
+                    </span>
+                    <b>{c.title}</b>
+                  </div>
+                  <p className="result-desc">{c.description}</p>
+                  {s && (
+                    <div className="chips">
+                      <span className={`chip ${s.total === best.total ? 'best' : ''}`}>
+                        Total {formatDuration(s.total)}
+                      </span>
+                      <span className={`chip ${s.worst === best.worst ? 'best' : ''}`}>
+                        Longest {formatDuration(s.worst)}
+                      </span>
+                      <span className={`chip ${s.spread === best.spread ? 'best' : ''}`}>
+                        Gap {formatDuration(s.spread)}
+                      </span>
+                    </div>
+                  )}
+                  {c.times && (
+                    <table className="times">
+                      <tbody>
+                        {points.map((p, i) => (
+                          <tr key={p.id}>
+                            <td>
+                              <span
+                                className="dot"
+                                style={{ background: PERSON_COLORS[i % PERSON_COLORS.length] }}
+                              />
+                              {shortLabel(p.label)}
+                            </td>
+                            <td className="time">{formatDuration(c.times![i])}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
                 </div>
-                <p className="result-desc">{c.description}</p>
-                {c.times && (
-                  <table className="times">
-                    <tbody>
-                      {points.map((p, i) => (
-                        <tr key={p.id}>
-                          <td>
-                            <span
-                              className="dot"
-                              style={{ background: PERSON_COLORS[i % PERSON_COLORS.length] }}
-                            />
-                            {shortLabel(p.label)}
-                          </td>
-                          <td className="time">{formatDuration(c.times![i])}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                )}
-              </div>
-            ))}
+              )
+            })}
           </div>
         )}
 
         <footer>
-          Geocoding © OpenStreetMap/Nominatim · Routing © Project OSRM demo server
+          Geocoding © OpenStreetMap/Nominatim · Routing © Project OSRM · Tiles © CARTO
         </footer>
       </aside>
-      <div className="map" ref={mapDivRef} />
     </div>
   )
 }
